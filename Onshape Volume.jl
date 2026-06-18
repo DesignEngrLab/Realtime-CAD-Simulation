@@ -1,25 +1,7 @@
 
 """
-step_volume.jl
-
-Two approaches to compute the volume of a STEP file:
-
-  1. volume_from_stl(path)  — compute volume from an STL file directly in Julia
-                              (fast, no external tools needed)
-
-  2. volume_from_step_via_onshape(did, wid, eid) — ask Onshape for the mass
-                              properties directly via its API (most accurate,
-                              uses the exact B-rep geometry, no tessellation error)
-
-Usage:
-    include("step_volume.jl")
-
-    # If you already have an STL file:
-    v = volume_from_stl("output.stl")
-    println("Volume: v mm³")
-
-    # Or get it straight from Onshape (most accurate):
-    
+CAD details from Onshape
+Volume, Mass, and Surface Area   
 """
 
 using Base64
@@ -27,11 +9,10 @@ using HTTP, JSON3
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# APPROACH 2 — Mass properties directly from Onshape API (most accurate)
+# Mass properties directly from Onshape API
 # ─────────────────────────────────────────────────────────────────────────────
 
-# Reuse credentials from onshape_cad_download.jl if already loaded,
-# otherwise define them here
+# Set variables for accessing Onshape API, password/keys and onshape url
 
     const ACCESS_KEY   = get(ENV, "ONSHAPE_ACCESS_KEY",  "on_f6UAmXSiWh8nB69SgzzfU")
     const SECRET_KEY   = get(ENV, "ONSHAPE_SECRET_KEY",  "GTO5ogi4xbomY5VtP3KCJHPwhEZUwu7AnhnKgq18ppmwE804")
@@ -39,7 +20,7 @@ using HTTP, JSON3
 
 
 """
-    volume_from_onshape(did, wid, eid; part_id=nothing) -> Dict
+volume_from_onshape(did, wid, eid; part_id=nothing) -> Dict
 
 Fetch mass properties for a Part Studio from the Onshape API.
 Returns a Dict with :volume, :mass, :surface_area, :density, :centroid.
@@ -48,11 +29,15 @@ Returns a Dict with :volume, :mass, :surface_area, :density, :centroid.
 
 Units follow the document settings (usually mm/kg).
 """
+#function using the did, wid, and eid for the desired assembly in Onshape without part id so it will pull full assembly values
 function volume_from_onshape(did::String, wid::String, eid::String;
                               part_id::Union{String,Nothing}=nothing)
+
+#Create URL path with the full inforamtion for CAD assembly                              
     path = "/api/partstudios/d/$did/w/$wid/e/$eid/massproperties"
     url  = BASE_URL * path
 
+#Create authorization token for accessing the API
     token   = base64encode("$(ACCESS_KEY):$(SECRET_KEY)")
     headers = [
         "Authorization" => "Basic $token",
@@ -64,7 +49,7 @@ function volume_from_onshape(did::String, wid::String, eid::String;
     println("Fetching mass properties from Onshape…")
     resp = HTTP.get(url * query, headers; status_exception=false)
     println("  [HTTP $(resp.status)]")
-
+#If unable to access the assembly/Onshape, error 
     if resp.status >= 400
         println("  [ERROR] $(String(resp.body))")
         error("HTTP $(resp.status) fetching mass properties")
@@ -90,6 +75,7 @@ function volume_from_onshape(did::String, wid::String, eid::String;
         ))
     end
 
+    #Display output from Onshape for variables
     println("\n  Mass Properties:")
     println("  " * "─"^40)
     for r in results
@@ -100,8 +86,9 @@ function volume_from_onshape(did::String, wid::String, eid::String;
         println("    Surface area: $(round(r[:surface_area_mm2], digits=2)) mm²")
         println("  " * "─"^40)
     end
-
-    return results
+#pull just mass out and pass back to demo Volume
+    mass = results[1][:mass_kg]
+    return(mass)
 end
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -113,17 +100,21 @@ function demo_volume()
 
 
 
-    # ── Method 2: direct from Onshape API (exact B-rep result) ───────────────
+    # variables for the CAD specific assembly in Onshape
     println("\n[Method 2] Volume from Onshape mass properties API")
     DID = "6c0d2b9b726f93f6e30525f2"
     WID = "e60b006b496816beb3fba67d"
     EID = "045a083a25ff8005c749039f"   # must be a Part Studio, not Assembly
-    volume_from_onshape(DID, WID, EID)
+    
+    mass= volume_from_onshape(DID, WID, EID)
+
+    return(mass)
 end
 
 if abspath(PROGRAM_FILE) == @__FILE__
     demo_volume()
 end
+
 
 
  
