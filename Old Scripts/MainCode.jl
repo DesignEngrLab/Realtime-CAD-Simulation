@@ -43,7 +43,7 @@ model_number = 0
 timer = 0.0
 
 # While loop to setup number of iterations or how much time to run (timer <= max time in seconds)
-while timer <= 10:
+while i <= 1:
     timer_current = time.time()
     
     # Pull in mass previous and iteration counter
@@ -78,8 +78,16 @@ while timer <= 10:
         # Display pull if step file pulled
         print("Pull")
         
+        python = raw"C:\Users\cmoss\AppData\Local\Programs\Python\Python312\python.exe"
+        script = raw"C:\Users\cmoss\RealTimeCADSim\Realtime-Cad-Simulation\step_to_omniverse.py"
+
+        step_file = joinpath(folder, "$(name)$(model_number).step")
+
+        run(`$python $script $step_file`)
         # Set previous mass to current to check for new changes
         MassPrevious = MassCurrent
+
+
     else:
         # If no change in mass detected, display no pull
         print("No Pull")
