@@ -7,18 +7,45 @@
 #   urdf_joint_map       -> joint_map.py from the URDF (no mates API calls)
 #   create_all_joints    -> joints in Kit (unchanged)
 
+import os
+import sys
+
+# BASE LOCATIONS for scripts and where it will upload data. Update for current PC
+base_loc_script = r"C:/Users/cmoss/RealTimeCADSim/Realtime-CAD-Simulation"                  
+base_loc_data = r"F:/RealTimeSimData"    
+
+if base_loc_script not in sys.path:                  
+    sys.path.insert(0, base_loc_script)
+
+
+# -----------------------------------------------------------------------
+# ITERATION COUNT
+# -----------------------------------------------------------------------
+# Max number of iterations (URDF re-pulls) for this run, AFTER the
+# original model. Before each one a popup shows "Iteration X of
+# MAX_ITERATIONS" -- press OK to pull the current CAD from Onshape and
+# re-simulate, or Cancel to end the run early.
+MAX_ITERATIONS = 10
+
+# Set to 0 for no delay between participant pressing ok and when it starts pulling file from Onshape.
+PULL_DELAY_SECONDS = 5.0
+
+# Make sure the sibling scripts below are importable from
+# base_loc_script no matter what directory this is launched from.
+if base_loc_script not in sys.path:
+    sys.path.insert(0, base_loc_script)
+
+
 import load_remote
 import File_Name
 import onshape_urdf_export
 import urdf_obj_asset
 import urdf_joint_map
-import onshape_webhook_listener
 import generate_joint_map
 import create_all_joints
 import physics_client
 import update_onshape_ids
-import register_webhook
-import os
+import tkinter as tk
 import time
 import subprocess
 import requests
@@ -26,27 +53,18 @@ import openpyxl
 from openpyxl.styles import Font
 import glob
 import math
-import sys
 from datetime import datetime
 
-# Directory this script itself lives in -- used to build absolute paths
-# to sibling scripts so subprocess calls work regardless of the
-# terminal's current working directory.
-SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
-
-
-
 #Section One, Set up folder for all data to be stored
-
 # Base directory location on PC for python scripts
-base_loc = r"E:/Onshape test"
+SCRIPT_DIR = base_loc_script
 
 # Pull current date/time
 current_datetime = datetime.now()
 current_datetime_str = current_datetime.strftime("%y_%m_%d_%H_%M")
 # Set folder path to the base location with a new folder labelled
 # with the date and time of the start of the experiment
-folder = os.path.join(base_loc, current_datetime_str)
+folder = os.path.join(base_loc_data, current_datetime_str)
 
 # If folder doesn't exist, create it
 if not os.path.isdir(folder):
@@ -142,16 +160,6 @@ if PROMPT_FOR_ONSHAPE_IDS:
 # is sufficient for your document, or whether you need to pass WID/EIDa too.
 name = File_Name.get_partstudio_name(DID)
 
-# NOTE: iteration counter, mass tracking, model number, and timer are
-# initialized inside main() itself now, not here at module level.
-# Assigning to a name anywhere inside a function makes Python treat it
-# as local for the WHOLE function -- so if these were only set here,
-# any `i += 1` etc. inside main() would shadow them with an
-# uninitialized local, causing UnboundLocalError the moment the while
-# loop's condition tried to read `i` before that function-local `i`
-# had ever been assigned.
-MassPrevious = None
-
 # Ground plane size (stage units, same convention as the asset scale
 # handled in the Kit extension's /load_asset route). This is the ONE
 # place this value should be set -- load_remote.create_ground_plane()
@@ -168,14 +176,6 @@ GROUND_PLANE_SIZE = 6000.0
 # of the same result, same as rerun_local_test.py.
 LANDING_TRACKER_TIMEOUT_S = 30.0
 LANDING_POLL_INTERVAL_S = 0.5
-
-# How long to wait, with NO further webhook flags seen, before actually
-# starting the CAD download -- debounces rapid successive edits (e.g.
-# collapseEvents batching, or just someone actively editing) into a
-# single re-pull reflecting the FINAL state, instead of kicking off an
-# expensive download+conversion+re-simulate cycle on every single
-# flag, possibly mid-edit.
-WEBHOOK_DEBOUNCE_SECONDS = 5.0
 
 # Per-part mass from the URDF <inertial> blocks (Onshape's own values for
 # the assigned materials -- already in the export, so no extra API calls).
@@ -229,7 +229,7 @@ def cad_pull(iteration):
 # live in different locations (E:\Onshape test\ vs
 # C:\OmniverseStream\kit-app-template), not nested inside each other.
 #Update to where omniverse BAT files live
-KIT_APP_ROOT = r"E:\OmniverseStream\kit-app-template"
+KIT_APP_ROOT = r"C:\OmniverseStream\kit-app-template"
 
 # The GENERATED per-app launcher .bat under _build/<platform>/release --
 # deliberately NOT `.\repo.bat launch` itself. repo.bat launch opens an
@@ -245,7 +245,8 @@ KIT_APP_ROOT = r"E:\OmniverseStream\kit-app-template"
 # _resolve_kit_app_launcher() below falls back to scanning the release
 # folder itself instead of just failing on it.
 KIT_APP_LAUNCHER = os.path.join(
-    KIT_APP_ROOT, "my_demo.my_editor_streaming.kit.bat",
+    KIT_APP_ROOT, "_build", "windows-x86_64", "release",
+    "my_demo.my_editor_streaming.kit.bat",
 )
 
 # Matches physics_client.KIT_HOST/KIT_PORT -- this is the same HTTP
@@ -402,132 +403,7 @@ def launch_kit_app():
     return process
 
 
-WEBHOOK_LISTENER_PORT = 5000
-WEBHOOK_LISTENER_READY_TIMEOUT_S = 10.0
 
-
-def start_webhook_listener_process():
-    """
-    Auto-starts onshape_webhook_listener.py as its own background
-    process, instead of requiring it to be launched manually in a
-    separate terminal. Uses subprocess.Popen (non-blocking) -- that
-    script's Flask dev server blocks forever once started via
-    app.run(), same reasoning as start_kit_app_process() above needing
-    Popen instead of run()/check_call().
-
-    If a listener is ALREADY running (left over from a previous run,
-    or started manually), this detects that via a quick reachability
-    check and skips launching a second one -- a second Flask process
-    couldn't bind the same port anyway.
-
-    Still requires your tunnel (ngrok etc.) to be running separately
-    and register_webhook.py to have been run at least once against
-    that tunnel's URL -- this only handles the LOCAL listener process
-    itself, not the public-facing tunnel or the Onshape-side
-    registration.
-    """
-    listener_path = os.path.join(SCRIPT_DIR, "onshape_webhook_listener.py")
-    listener_url = f"http://127.0.0.1:{WEBHOOK_LISTENER_PORT}/"
-
-    if not os.path.isfile(listener_path):
-        print(f"WARNING: onshape_webhook_listener.py not found at {listener_path} -- "
-              f"webhook-triggered updates won't work until it exists and either this "
-              f"auto-start or a manual `python onshape_webhook_listener.py` run gets it going.")
-        return None
-
-    try:
-        requests.get(listener_url, timeout=2)
-        print("Webhook listener already running -- not starting a second one.")
-        return None
-    except requests.exceptions.RequestException:
-        pass
-
-    print(f"Starting webhook listener: {listener_path}")
-    process = subprocess.Popen([sys.executable, listener_path])
-
-    deadline = time.time() + WEBHOOK_LISTENER_READY_TIMEOUT_S
-    while time.time() < deadline:
-        if process.poll() is not None:
-            print(f"WARNING: webhook listener process exited early (return code "
-                  f"{process.returncode}) -- check its own output above for the actual error.")
-            return process
-        try:
-            requests.get(listener_url, timeout=1)
-            print("Webhook listener is up and responding.")
-            return process
-        except requests.exceptions.RequestException:
-            time.sleep(0.5)
-
-    print(f"WARNING: webhook listener didn't respond within {WEBHOOK_LISTENER_READY_TIMEOUT_S:.0f}s "
-          f"of starting -- check for errors in its own output, and confirm nothing else is "
-          f"already using port {WEBHOOK_LISTENER_PORT}.")
-    return process
-
-
-def ensure_webhook_registered(did: str, wid: str, eid: str):
-    """
-    Checks whether a webhook already exists for THIS document (the one
-    from the popup-entered URLs, not whatever register_webhook.py's
-    own hardcoded constants say) and only registers a new one if it
-    doesn't -- avoids creating a duplicate registration every single
-    run.
-
-    "Already exists for this document" is checked via the `filter`
-    field on each registered webhook -- confirmed (see
-    register_webhook.py's own comments) that this is the field Onshape
-    actually uses for document/workspace/element scoping, unlike the
-    top-level documentId field which doesn't reliably come back in
-    list responses. A match is only treated as "good" if its url ALSO
-    matches the CURRENT tunnel URL -- a match against a stale url
-    (e.g. from a previous ngrok session) gets cleaned up and replaced,
-    since a dead URL there is functionally the same as no registration
-    at all.
-
-    Monkeypatches register_webhook's own DOCUMENT_ID/WORKSPACE_ID/
-    ELEMENT_ID module attributes to these values before calling its
-    register_webhook() function -- same pattern already used elsewhere
-    in this file for generate_joint_map, since
-    register_webhook.py's registration logic reads those as module-
-    level globals rather than taking them as parameters.
-    """
-    document_filter_marker = f"{{$DocumentId}} = '{did}'"
-
-    try:
-        webhooks = register_webhook.list_webhooks()
-    except requests.exceptions.RequestException as e:
-        print(f"WARNING: couldn't check existing webhooks ({e}) -- skipping webhook "
-              f"registration for this run. Webhook-triggered updates won't work until "
-              f"this is checked manually (e.g. run register_webhook.py directly).")
-        return
-
-    items = webhooks.get("items", webhooks) if isinstance(webhooks, dict) else webhooks
-    for wh in items or []:
-        if document_filter_marker in (wh.get("filter") or ""):
-            if wh.get("url") == register_webhook.CALLBACK_URL:
-                print(f"Webhook already registered for this document at the current "
-                      f"tunnel URL (id={wh.get('id')}) -- not creating another one.")
-                return
-            else:
-                print(f"Found an existing webhook for this document, but pointed at a "
-                      f"stale URL ({wh.get('url')!r} != current {register_webhook.CALLBACK_URL!r}) "
-                      f"-- deleting it before registering a fresh one: id={wh.get('id')}")
-                try:
-                    register_webhook.delete_webhook(wh["id"])
-                except requests.exceptions.RequestException as e:
-                    print(f"WARNING: failed to delete stale webhook {wh.get('id')} ({e}) -- "
-                          f"continuing to register a new one anyway.")
-
-    if not register_webhook.check_callback_reachable():
-        print("NOT registering a webhook -- CALLBACK_URL isn't reachable right now "
-              "(tunnel down, or listener not actually up yet). Webhook-triggered "
-              "updates won't work until this is fixed and register_webhook.py is run "
-              "again (manually, or via this function on the next run).")
-        return
-
-    register_webhook.DOCUMENT_ID = did
-    register_webhook.WORKSPACE_ID = wid
-    register_webhook.ELEMENT_ID = eid
-    register_webhook.register_webhook()
 
 
 def filter_frame_self_collision(entries):
@@ -735,44 +611,63 @@ def run_ball_landing_check(model_number):
         log_ball_distance(model_number, None)
 
 
-def check_for_onshape_update() -> bool:
+def prompt_next_iteration(iteration: int, max_iterations: int) -> bool:
     """
-    Checks the REAL webhook flag -- requires
-    `python onshape_webhook_listener.py` to be running as its own
-    separate process, with your tunnel (ngrok etc.) forwarding to it
-    and register_webhook.py already run once against that tunnel URL.
-
-    This is a plain in-memory-then-file-based check
-    (read_and_clear_change_flag() reads/deletes a small JSON flag file
-    onshape_webhook_listener.py writes to on each real Onshape edit)
-    -- NOT an Onshape API call itself. The actual API calls happen
-    below in main()'s loop (cad_pull -> URDF export) only when this
-    returns True.
+    Pops up a dialog in the TOP-RIGHT corner of the screen asking whether
+    to start the next iteration (pull the current URDF from Onshape and re-simulate). Shows the iteration
+    number and the max for this run. Returns True on OK, False on
+    Cancel / closing the window.
+ 
+    Built as a small custom window instead of messagebox.askokcancel(),
+    because messagebox dialogs can't be positioned -- the OS always
+    centers them. Forced topmost so it appears in front of Kit's window
+    instead of hiding behind it.
     """
-    event = onshape_webhook_listener.read_and_clear_change_flag()
-    if event is not None:
-        print(f"Webhook fired: {event.get('event')} on documentId={event.get('documentId')} "
-              f"at {event.get('timestamp')}")
-        return True
-    return False
-
+    margin = 20  # pixels from the top and right edges of the screen
+    result = {"ok": False}
+ 
+    root = tk.Tk()
+    root.title("Next Iteration")
+    root.attributes("-topmost", True)
+    root.resizable(False, False)
+ 
+    def on_ok(event=None):
+        result["ok"] = True
+        root.destroy()
+ 
+    def on_cancel(event=None):
+        result["ok"] = False
+        root.destroy()
+ 
+    frame = tk.Frame(root, padx=16, pady=12)
+    frame.pack()
+    tk.Label(frame, text=f"Iteration {iteration} of {max_iterations}",
+             font=("Arial", 12, "bold")).pack(anchor="w")
+    tk.Label(frame,
+             text="Make your Onshape changes, then press OK to pull the URDF and run this iteration.\n\nPress Cancel to end the run.",
+             font=("Arial", 10), justify="left", wraplength=280).pack(anchor="w", pady=(8, 12))
+ 
+    buttons = tk.Frame(frame)
+    buttons.pack(anchor="e")
+    tk.Button(buttons, text="OK", width=10, command=on_ok).pack(side="left", padx=(0, 6))
+    tk.Button(buttons, text="Cancel", width=10, command=on_cancel).pack(side="left")
+ 
+    root.bind("<Return>", on_ok)
+    root.bind("<Escape>", on_cancel)
+    root.protocol("WM_DELETE_WINDOW", on_cancel)
+ 
+    # Measure the finished window, then place it in the top-right corner.
+    root.update_idletasks()
+    width = root.winfo_reqwidth()
+    x = root.winfo_screenwidth() - width - margin
+    root.geometry(f"+{x}+{margin}")
+ 
+    root.lift()
+    root.focus_force()
+    root.mainloop()
+    return result["ok"]
 
 def main():
-
-    # Auto-start the webhook listener first -- cheap and near-instant
-    # (just opens a local Flask server), so no reason to delay it
-    # behind the slower Kit/CAD work below. Still requires your tunnel
-    # to be running separately -- this only handles starting the LOCAL
-    # process.
-    start_webhook_listener_process()
-
-    # Now that the listener is (hopefully) up, check whether a webhook
-    # already exists for THIS document/workspace/element -- the
-    # popup-derived DID/WID/EIDa from earlier in this file, not
-    # register_webhook.py's own separate hardcoded constants -- and
-    # only register a fresh one if it doesn't (or if the existing one
-    # points at a stale tunnel URL).
-    ensure_webhook_registered(DID, WID, EIDa)
 
     # Start Kit booting in the BACKGROUND immediately -- don't block
     # here. cad_pull() (URDF export + download + asset build) takes
@@ -796,54 +691,26 @@ def main():
 
     run_ball_landing_check("original")
 
-    # Loop counters, initialized here (not at module level) so Python
-    # doesn't treat them as unbound locals -- see note above MassPrevious.
-    i = 0
-    model_number = 1
-    timer = 0.0
-
-    # Tracks when the LAST webhook flag was seen, so the actual CAD
-    # download only starts after WEBHOOK_DEBOUNCE_SECONDS of quiet --
-    # not on every single flag. A new flag arriving during the wait
-    # RESETS this, extending the quiet period -- rapid successive
-    # edits collapse into one re-pull reflecting the final state,
-    # instead of one (expensive) re-pull attempt per edit.
-    last_flag_time = None
-
     # Main loop
-    while i <= 1 or timer <= 5.0:
-        timer_current = time.time()
+    for iteration in range(1, MAX_ITERATIONS + 1):
+        if not prompt_next_iteration(iteration, MAX_ITERATIONS):
+            print(f"\nRun ended by user before iteration {iteration}.")
+            break
 
-        if check_for_onshape_update():
-            last_flag_time = time.time()
-            print(f"Webhook flag seen -- waiting {WEBHOOK_DEBOUNCE_SECONDS:.0f}s of quiet "
-                  f"before pulling, in case more edits are still coming in.")
-        elif last_flag_time is not None and (time.time() - last_flag_time) >= WEBHOOK_DEBOUNCE_SECONDS:
-            print(f"\n{WEBHOOK_DEBOUNCE_SECONDS:.0f}s since the last webhook flag -- "
-                  f"starting CAD download now.")
-            last_flag_time = None  # reset BEFORE the pull, not after -- a flag arriving
-                                    # DURING the pull should start its own fresh debounce
-                                    # window for the NEXT pull, not be silently absorbed.
-
-            usd_file, urdf_file, mesh_dir = cad_pull(model_number)
-            load_model(usd_file, urdf_file, mesh_dir)
-
-            # Ball distance check on EVERY re-pull, not just the
-            # initial load -- each new CAD version gets its own
-            # simulation run and its own reported throw distance.
-            # Uses model_number BEFORE incrementing it below -- that's
-            # the number cad_pull() actually just downloaded, and what
-            # the log should show this row is for.
-            run_ball_landing_check(model_number)
-            model_number += 1
-        else:
-            print("No Update")
-
-        time.sleep(0.25)
-        i += 1
-
-        # Add elapsed loop time to timer
-        timer += time.time() - timer_current
+        if PULL_DELAY_SECONDS > 0:
+            print(f"\nOK pressed -- waiting {PULL_DELAY_SECONDS:g}s before pulling URDF...")
+            time.sleep(PULL_DELAY_SECONDS)
+            
+        print(f"\n--- Iteration {iteration} of {MAX_ITERATIONS}: pulling URDF ---")
+        usd_file, urdf_file, mesh_dir = cad_pull(iteration)
+        load_model(usd_file, urdf_file, mesh_dir)
+ 
+        # Ball distance check on EVERY re-pull, not just the initial
+        # load -- each new CAD version gets its own simulation run and
+        # its own reported throw distance.
+        run_ball_landing_check(iteration)
+    else:
+        print(f"\nReached MAX_ITERATIONS ({MAX_ITERATIONS}) -- run complete.")
 
 
 if __name__ == "__main__":

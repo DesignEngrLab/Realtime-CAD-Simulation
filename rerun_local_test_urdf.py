@@ -22,12 +22,37 @@ the whole load/simulate cycle back to back in one session.
 """
 
 import os
+import sys
+
+# BASE LOCATIONS for scripts and where it will upload data. Update for current PC
+base_loc_script = r"E:/Onshape test"                  
+base_loc_data = r"F:/RealTimeSimData"    
+
+# -----------------------------------------------------------------------
+# ITERATION COUNT
+# -----------------------------------------------------------------------
+# Max number of iterations (re-runs) for this session, AFTER the
+# original run. Before each one a popup shows "Iteration X of
+# MAX_ITERATIONS" -- press OK to re-read the URDF and re-simulate, or
+# Cancel to end the session early.
+MAX_ITERATIONS = 10
+
+# Seconds to wait after OK is pressed before the URDF is re-read
+# (e.g. to give a file copy time to finish). Set to 0 for no delay.
+PULL_DELAY_SECONDS = 5.0
+
+# Make sure the sibling scripts below are importable from
+# base_loc_script no matter what directory this is launched from.
+
+if base_loc_script not in sys.path:                  
+    sys.path.insert(0, base_loc_script)
+
+
 import glob
 import math
 import time
 import subprocess
 import requests
-import sys
 import openpyxl
 from openpyxl.styles import Font
 from datetime import datetime
@@ -40,19 +65,13 @@ import urdf_obj_asset
 import physics_client
 
 # Directory this script lives in (joint_map.py is written here).
-SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+SCRIPT_DIR = base_loc_script
 
-# -----------------------------------------------------------------------
-# PER-RUN FOLDER + BALL DISTANCE LOG -- same convention as
-# ExperimentCodeComplete.py: one timestamped folder per script
-# execution, one Excel log inside it covering every throw this run
-# produces.
-# -----------------------------------------------------------------------
-#Update with folder location for python scripts
-base_loc = r"E:\Onshape test"
+
+#Create folder with current date/time in data file location as well as create excel file to track each iteration output
 current_datetime = datetime.now()
 current_datetime_str = current_datetime.strftime("%y_%m_%d_%H_%M")
-folder = os.path.join(base_loc, current_datetime_str)
+folder = os.path.join(base_loc_data, current_datetime_str)
 if not os.path.isdir(folder):
     os.makedirs(folder)
 BALL_DISTANCE_LOG_PATH = os.path.join(folder, "ball_distance_log.xlsx")
@@ -416,10 +435,61 @@ def load_and_run(urdf_file: str, run_label):
             log_ball_distance(run_label, None)
 
 
-# How many back-to-back load/simulate/log cycles to run in one session
-# (each one clears the stage first). 1 = a single test run.
-NUM_RUNS = 1
-
+def prompt_next_iteration(iteration: int, max_iterations: int) -> bool:
+    """
+    Pops up a dialog in the TOP-RIGHT corner of the screen asking whether
+    to start the next iteration (re-read the URDF from disk and re-simulate). Shows the iteration
+    number and the max for this run. Returns True on OK, False on
+    Cancel / closing the window.
+ 
+    Built as a small custom window instead of messagebox.askokcancel(),
+    because messagebox dialogs can't be positioned -- the OS always
+    centers them. Forced topmost so it appears in front of Kit's window
+    instead of hiding behind it.
+    """
+    margin = 20  # pixels from the top and right edges of the screen
+    result = {"ok": False}
+ 
+    root = tk.Tk()
+    root.title("Next Iteration")
+    root.attributes("-topmost", True)
+    root.resizable(False, False)
+ 
+    def on_ok(event=None):
+        result["ok"] = True
+        root.destroy()
+ 
+    def on_cancel(event=None):
+        result["ok"] = False
+        root.destroy()
+ 
+    frame = tk.Frame(root, padx=16, pady=12)
+    frame.pack()
+    tk.Label(frame, text=f"Iteration {iteration} of {max_iterations}",
+             font=("Arial", 12, "bold")).pack(anchor="w")
+    tk.Label(frame,
+             text="Replace the URDF/mesh files if needed, then press OK to re-read the URDF and run this iteration.\n\nPress Cancel to end the run.",
+             font=("Arial", 10), justify="left", wraplength=280).pack(anchor="w", pady=(8, 12))
+ 
+    buttons = tk.Frame(frame)
+    buttons.pack(anchor="e")
+    tk.Button(buttons, text="OK", width=10, command=on_ok).pack(side="left", padx=(0, 6))
+    tk.Button(buttons, text="Cancel", width=10, command=on_cancel).pack(side="left")
+ 
+    root.bind("<Return>", on_ok)
+    root.bind("<Escape>", on_cancel)
+    root.protocol("WM_DELETE_WINDOW", on_cancel)
+ 
+    # Measure the finished window, then place it in the top-right corner.
+    root.update_idletasks()
+    width = root.winfo_reqwidth()
+    x = root.winfo_screenwidth() - width - margin
+    root.geometry(f"+{x}+{margin}")
+ 
+    root.lift()
+    root.focus_force()
+    root.mainloop()
+    return result["ok"]
 
 def main():
     urdf_file = urdf_joint_map.find_urdf_file(URDF_FOLDER)
@@ -429,10 +499,31 @@ def main():
 
     load_remote.create_ground_plane(size=GROUND_PLANE_SIZE)
 
-    for run in range(1, NUM_RUNS + 1):
-        load_and_run(urdf_file, run_label="original" if run == 1 else f"repeat #{run - 1}")
-
-    print(f"\nDone -- {NUM_RUNS} run(s). Results logged to {BALL_DISTANCE_LOG_PATH}")
+    load_and_run(urdf_file, run_label="original")
+    runs_done = 1
+    
+    # Main loop -- one iteration per OK press in the popup, up to
+    # MAX_ITERATIONS. Iteration number is used as the run label in the
+    # .usda file name and the ball distance log row.
+    for iteration in range(1, MAX_ITERATIONS + 1):
+        if not prompt_next_iteration(iteration, MAX_ITERATIONS):
+            print(f"\nRun ended by user before iteration {iteration}.")
+            break
+    
+        if PULL_DELAY_SECONDS > 0:
+            print(f"\nOK pressed -- waiting {PULL_DELAY_SECONDS:g}s before re-reading URDF...")
+            time.sleep(PULL_DELAY_SECONDS)
+    
+        print(f"\n--- Iteration {iteration} of {MAX_ITERATIONS}: re-reading URDF ---")
+        # Re-find the .urdf each time in case the export was replaced
+        # with one that has a different file name.
+        urdf_file = urdf_joint_map.find_urdf_file(URDF_FOLDER)
+        load_and_run(urdf_file, run_label=iteration)
+        runs_done += 1
+    else:
+        print(f"\nReached MAX_ITERATIONS ({MAX_ITERATIONS}) -- run complete.")
+    
+    print(f"\nDone -- {runs_done} run(s). Results logged to {BALL_DISTANCE_LOG_PATH}")
 
 
 if __name__ == "__main__":
