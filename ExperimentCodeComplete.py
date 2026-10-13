@@ -11,8 +11,8 @@ import os
 import sys
 
 # BASE LOCATIONS for scripts and where it will upload data. Update for current PC
-base_loc_script = r"C:/Users/cmoss/RealTimeCADSim/Realtime-CAD-Simulation"                  
-base_loc_data = r"F:/RealTimeSimData"    
+base_loc_script = r"C:/Users/caleb/OneDrive/Documents/Onshape test/Python"                  
+base_loc_data = r"C:/Users/caleb/OneDrive/Documents/Onshape test/Python"    
 
 if base_loc_script not in sys.path:                  
     sys.path.insert(0, base_loc_script)
@@ -28,7 +28,8 @@ if base_loc_script not in sys.path:
 MAX_ITERATIONS = 10
 
 # Set to 0 for no delay between participant pressing ok and when it starts pulling file from Onshape.
-PULL_DELAY_SECONDS = 5.0
+PULL_DELAY_SECONDS = 10.0
+
 
 # Make sure the sibling scripts below are importable from
 # base_loc_script no matter what directory this is launched from.
@@ -54,6 +55,14 @@ from openpyxl.styles import Font
 import glob
 import math
 from datetime import datetime
+
+# Max time for run in minutes
+MAX_RUN_MINUTES = 60
+
+run_started_at = datetime.now()
+simulations_run = 0
+ended_by = "Error or interrupted"
+IterationTime = 0
 
 #Section One, Set up folder for all data to be stored
 # Base directory location on PC for python scripts
@@ -229,7 +238,7 @@ def cad_pull(iteration):
 # live in different locations (E:\Onshape test\ vs
 # C:\OmniverseStream\kit-app-template), not nested inside each other.
 #Update to where omniverse BAT files live
-KIT_APP_ROOT = r"C:\OmniverseStream\kit-app-template"
+KIT_APP_ROOT = r"C:/Users/caleb/OneDrive/Documents/Onshape test/Omniverse/trebuchet_sim"
 
 # The GENERATED per-app launcher .bat under _build/<platform>/release --
 # deliberately NOT `.\repo.bat launch` itself. repo.bat launch opens an
@@ -245,8 +254,7 @@ KIT_APP_ROOT = r"C:\OmniverseStream\kit-app-template"
 # _resolve_kit_app_launcher() below falls back to scanning the release
 # folder itself instead of just failing on it.
 KIT_APP_LAUNCHER = os.path.join(
-    KIT_APP_ROOT, "_build", "windows-x86_64", "release",
-    "my_demo.my_editor_streaming.kit.bat",
+    KIT_APP_ROOT, "my_demo.my_editor_streaming.kit.bat",
 )
 
 # Matches physics_client.KIT_HOST/KIT_PORT -- this is the same HTTP
@@ -507,6 +515,18 @@ def log_ball_distance(model_number, distance_meters):
     wb.save(BALL_DISTANCE_LOG_PATH)
     print(f"Logged to {BALL_DISTANCE_LOG_PATH}: model_number={model_number}, distance={value}")
 
+def log_review_time(model_number, seconds):
+    """Write the review time into column D of that model's row."""
+    wb = openpyxl.load_workbook(BALL_DISTANCE_LOG_PATH)
+    sheet = wb["Ball Distance Log"]
+    if sheet.cell(row=1, column=4).value is None:
+        sheet.cell(row=1, column=4, value="Review Time (s)").font = Font(name="Arial", bold=True)
+        sheet.column_dimensions["D"].width = 18
+    for row in range(sheet.max_row, 1, -1):          # newest row first
+        if sheet.cell(row=row, column=1).value == model_number:
+            sheet.cell(row=row, column=4, value=round(seconds, 1)).font = Font(name="Arial")
+            break
+    wb.save(BALL_DISTANCE_LOG_PATH)
 
 def _ball_world_position(ball_path):
     """(world position in stage units, meters_per_unit) of the Ball prim's
@@ -611,7 +631,7 @@ def run_ball_landing_check(model_number):
         log_ball_distance(model_number, None)
 
 
-def prompt_next_iteration(iteration: int, max_iterations: int) -> bool:
+def prompt_next_iteration(iteration: int, max_iterations: int, timeout_s: float = None) -> bool:
     """
     Pops up a dialog in the TOP-RIGHT corner of the screen asking whether
     to start the next iteration (pull the current URDF from Onshape and re-simulate). Shows the iteration
@@ -661,14 +681,44 @@ def prompt_next_iteration(iteration: int, max_iterations: int) -> bool:
     width = root.winfo_reqwidth()
     x = root.winfo_screenwidth() - width - margin
     root.geometry(f"+{x}+{margin}")
- 
+
+    # Run time limit: close the popup automatically when time runs out.
+    if timeout_s is not None:
+        root.after(max(0, int(timeout_s * 1000)), on_cancel)
+    
     root.lift()
     root.focus_force()
     root.mainloop()
     return result["ok"]
 
-def main():
+def log_run_summary(run_started, total_seconds, simulations_run, ended_by):
+    """Write the run's totals to a 'Run Summary' sheet in the ball distance log."""
+    if os.path.isfile(BALL_DISTANCE_LOG_PATH):
+        wb = openpyxl.load_workbook(BALL_DISTANCE_LOG_PATH)
+    else:
+        wb = openpyxl.Workbook()
+        wb.active.title = "Ball Distance Log"
+    if "Run Summary" in wb.sheetnames:
+        del wb["Run Summary"]          # rewrite it fresh each time
+    sheet = wb.create_sheet("Run Summary")
 
+    rows = [
+        ("Run started", run_started.strftime("%Y-%m-%d %H:%M:%S")),
+        ("Run ended", datetime.now().strftime("%Y-%m-%d %H:%M:%S")),
+        ("Total run time (s)", round(total_seconds, 1)),
+        ("Total run time (min)", round(total_seconds / 60, 2)),
+        ("Simulations run", simulations_run),
+        ("Ended by", ended_by),
+    ]
+    for r, (label, value) in enumerate(rows, start=1):
+        sheet.cell(row=r, column=1, value=label).font = Font(name="Arial", bold=True)
+        sheet.cell(row=r, column=2, value=value).font = Font(name="Arial")
+    sheet.column_dimensions["A"].width = 22
+    sheet.column_dimensions["B"].width = 22
+    wb.save(BALL_DISTANCE_LOG_PATH)
+    print(f"Run summary saved to {BALL_DISTANCE_LOG_PATH} (sheet 'Run Summary').")
+
+def main():
     # Start Kit booting in the BACKGROUND immediately -- don't block
     # here. cad_pull() (URDF export + download + asset build) takes
     # real time too; overlapping Kit's own
@@ -690,27 +740,55 @@ def main():
     load_model(usd_file, urdf_file, mesh_dir, create_ground=True)
 
     run_ball_landing_check("original")
-
+    run_start = time.monotonic()          # run timer starts with the first simulation
+    max_run_s = MAX_RUN_MINUTES * 60
+    simulations_run = 0  
+    results_shown = time.monotonic()      # distance is on screen now
+    last_model = "original"
     # Main loop
     for iteration in range(1, MAX_ITERATIONS + 1):
-        if not prompt_next_iteration(iteration, MAX_ITERATIONS):
-            print(f"\nRun ended by user before iteration {iteration}.")
+        time_left = max_run_s - (time.monotonic() - run_start) if max_run_s else None
+        if time_left is not None and time_left <= 0:
+            print(f"\nRun ended: time limit of {MAX_RUN_MINUTES} min reached.")
+            ended_by = "Time limit"
             break
 
-        if PULL_DELAY_SECONDS > 0:
-            print(f"\nOK pressed -- waiting {PULL_DELAY_SECONDS:g}s before pulling URDF...")
-            time.sleep(PULL_DELAY_SECONDS)
-            
+        answer = prompt_next_iteration(iteration, MAX_ITERATIONS, timeout_s=time_left)
+        ok_pressed = time.monotonic()
+
+        # Iteration time: from distance shown to OK (or Cancel) pressed.
+        review_s = ok_pressed - results_shown
+        print(f"\nReview time for model {last_model}: {review_s:.1f} s")
+        log_review_time(last_model, review_s)
+
+        if not answer:
+            timed_out = time_left is not None and ok_pressed - run_start >= max_run_s
+            ended_by = "Time limit" if timed_out else "User (Cancel)"                   
+            print(f"\nRun ended by {ended_by.lower()} before iteration {iteration}.")
+            break
+
         print(f"\n--- Iteration {iteration} of {MAX_ITERATIONS}: pulling URDF ---")
         usd_file, urdf_file, mesh_dir = cad_pull(iteration)
+
+        # Delay = TOTAL time from OK to upload start. The download counts toward it.
+        remaining = PULL_DELAY_SECONDS - (time.monotonic() - ok_pressed)
+        if remaining > 0:
+            print(f"Download done -- waiting {remaining:.1f}s more before uploading...")
+            time.sleep(remaining)
+
         load_model(usd_file, urdf_file, mesh_dir)
- 
-        # Ball distance check on EVERY re-pull, not just the initial
-        # load -- each new CAD version gets its own simulation run and
-        # its own reported throw distance.
         run_ball_landing_check(iteration)
+        simulations_run += 1
+        results_shown = time.monotonic()
+        last_model = iteration
     else:
         print(f"\nReached MAX_ITERATIONS ({MAX_ITERATIONS}) -- run complete.")
+        ended_by = "Max iterations"
+
+    total_s = time.monotonic() - run_start
+    print(f"\nTotal run time: {total_s / 60:.1f} min ({total_s:.0f} s), "
+          f"{simulations_run} simulation(s), ended by: {ended_by}")
+    log_run_summary(run_started_at, total_s, simulations_run, ended_by)
 
 
 if __name__ == "__main__":
