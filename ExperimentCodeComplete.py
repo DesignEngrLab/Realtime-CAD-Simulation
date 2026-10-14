@@ -208,6 +208,25 @@ STAGE_UP_AXIS = "Z"
 urdf_joint_map.STAGE_UP_AXIS = STAGE_UP_AXIS
 MOVING_PART_NAMES = ["ThrowingArm", "Ball"]
 
+def export_urdf_with_retry(did, wid, eid, export_dir):
+    """
+    Calls onshape_urdf_export.export_assembly_urdf(), retrying when
+    Onshape returns a temporary server error (HTTP 5xx). Errors that
+    aren't server-side (bad keys, wrong IDs, etc.) are raised right away.
+    """
+    for attempt in range(1, EXPORT_RETRIES + 2):
+        try:
+            return onshape_urdf_export.export_assembly_urdf(did, wid, eid, export_dir)
+        except requests.HTTPError as e:
+            status = e.response.status_code if e.response is not None else None
+            if status is None or status < 500 or attempt > EXPORT_RETRIES:
+                raise
+            print(f"Onshape server error (HTTP {status}) -- retrying export in "
+                  f"{EXPORT_RETRY_WAIT_SECONDS:g}s "
+                  f"(retry {attempt} of {EXPORT_RETRIES})...")
+            time.sleep(EXPORT_RETRY_WAIT_SECONDS)
+
+
 
 # Function to pull cad from Onshape
 def cad_pull(iteration):
